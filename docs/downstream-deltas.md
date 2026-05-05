@@ -40,14 +40,6 @@ If upstream later makes the patch unnecessary, mark it and remove the code in th
 - Revalidation trigger: upstream changes to Slack routing semantics or our Slack delivery requirements changing.
 - Notes: local downstream work included commits such as `ac773dce9`, `65893239b`, `5b44e5b7e`.
 
-### Mixed-version tool registry generation fallback
-- Status: active
-- Scope: `model_tools.py`, `tests/test_model_tools.py`
-- Reason: long-lived gateway processes may temporarily keep an older in-memory registry singleton across code upgrades; missing `_generation` should not hard-fail tool definition loading before restart.
-- Upstream status: not proposed
-- Revalidation trigger: upstream introduces an equivalent compatibility guard or changes tool registry cache invalidation.
-- Notes: downstream commit `9226ddb61`.
-
 ---
 
 ## Removed / upstreamed deltas
