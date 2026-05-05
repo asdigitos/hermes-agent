@@ -160,6 +160,30 @@ Before updating the running Hermes instance to a new downstream commit:
 2. ensure relevant tests passed
 3. record the reason in PR / commit history
 4. restart the gateway after code updates
+5. get explicit approval from Victor before changing the live local installation
+
+For the full upgrade / rollback procedure, see `docs/local-installation-upgrade-rollback-sop.md`.
+A manual operator rollback helper is available at `scripts/rollback-local-hermes.sh`.
+
+## Local installation change boundary
+
+Routine fork maintenance and local installation adoption are separate operations.
+
+Allowed without extra approval:
+
+- fetch from `origin` / `upstream`
+- create worktrees
+- prepare integration branches
+- run validation in non-runtime worktrees
+- push branches and open PRs
+
+Not allowed without explicit approval from Victor:
+
+- switching the live runtime checkout to a new branch / commit
+- resetting the live runtime checkout to `origin/main`
+- running `hermes update` for local adoption
+- restarting / reinstalling the gateway as part of adopting a new local code version
+- rolling back the local installation
 
 ## Suggested maintenance ownership
 
