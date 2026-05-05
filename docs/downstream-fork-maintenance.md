@@ -163,6 +163,7 @@ Before updating the running Hermes instance to a new downstream commit:
 5. get explicit approval from Victor before changing the live local installation
 
 For the full upgrade / rollback procedure, see `docs/local-installation-upgrade-rollback-sop.md`.
+A manual operator rollback helper is available at `scripts/rollback-local-hermes.sh`.
 
 ## Local installation change boundary
 

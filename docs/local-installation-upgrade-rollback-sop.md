@@ -113,6 +113,17 @@ PREV_SHA=$(git rev-parse HEAD)
 printf 'branch=%s\nsha=%s\ntime=%s\n' "$PREV_BRANCH" "$PREV_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
+For the operator-friendly rollback script, also save a state file:
+
+```bash
+cd ~/.hermes/hermes-agent
+PREV_BRANCH=$(git branch --show-current)
+PREV_SHA=$(git rev-parse HEAD)
+printf 'branch=%s\nsha=%s\ntime=%s\n' \
+  "$PREV_BRANCH" "$PREV_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  > ~/.hermes/local-installation-last-known-good.env
+```
+
 Store those values in the change report. They are the minimum rollback handle.
 
 ### 3) Adopt the target commit in the runtime checkout
@@ -280,6 +291,34 @@ hermes gateway status
 cd ~/.hermes/hermes-agent
 git branch --show-current
 git rev-parse HEAD
+```
+
+### 5) Operator shortcut script
+
+If the rollback target was saved before the upgrade, the operator can run:
+
+```bash
+cd ~/.hermes/hermes-agent
+scripts/rollback-local-hermes.sh \
+  --state-file ~/.hermes/local-installation-last-known-good.env
+```
+
+If the working tree is dirty and the rollback must intentionally discard local changes:
+
+```bash
+cd ~/.hermes/hermes-agent
+scripts/rollback-local-hermes.sh \
+  --state-file ~/.hermes/local-installation-last-known-good.env \
+  --allow-discard-local-changes
+```
+
+If the operator needs to force a specific branch / SHA directly:
+
+```bash
+cd ~/.hermes/hermes-agent
+scripts/rollback-local-hermes.sh \
+  --branch fix/mcp-add-command-routing \
+  --sha 9226ddb6193b4a2951f99652c1d8b4c5d02267ec
 ```
 
 ## I. Change record template
