@@ -472,9 +472,18 @@ def _resolve_runtime_agent_kwargs() -> dict:
     )
     from hermes_cli.auth import AuthError
 
+    _requested_provider = os.getenv("HERMES_INFERENCE_PROVIDER")
+    logger.info(
+        "gateway runtime resolve start: requested_env_provider=%s config_model_provider=%s config_model_default=%s config_model_api_mode=%s",
+        _requested_provider or "",
+        (_load_gateway_config() or {}).get("model", {}).get("provider", ""),
+        (_load_gateway_config() or {}).get("model", {}).get("default", ""),
+        (_load_gateway_config() or {}).get("model", {}).get("api_mode", ""),
+    )
+
     try:
         runtime = resolve_runtime_provider(
-            requested=os.getenv("HERMES_INFERENCE_PROVIDER"),
+            requested=_requested_provider,
         )
     except AuthError as auth_exc:
         # Primary provider auth failed (expired token, revoked key, etc.).
@@ -486,6 +495,16 @@ def _resolve_runtime_agent_kwargs() -> dict:
         raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
+
+    logger.info(
+        "gateway runtime resolve result: provider=%s base_url=%s api_mode=%s has_api_key=%s command=%s args_count=%s",
+        runtime.get("provider") or "",
+        runtime.get("base_url") or "",
+        runtime.get("api_mode") or "",
+        bool(runtime.get("api_key")),
+        runtime.get("command") or "",
+        len(list(runtime.get("args") or [])),
+    )
 
     return {
         "api_key": runtime.get("api_key"),
@@ -1240,9 +1259,31 @@ class GatewayRunner:
             )
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
+        logger.info(
+            "session runtime pre-override: session=%s source_platform=%s chat=%s thread=%s config_model=%s resolved_provider=%s resolved_base_url=%s resolved_api_mode=%s override_present=%s override_provider=%s override_model=%s",
+            resolved_session_key or "",
+            getattr(source, "platform", "") if source is not None else "",
+            getattr(source, "chat_id", "") if source is not None else "",
+            getattr(source, "thread_id", "") if source is not None else "",
+            model or "",
+            runtime_kwargs.get("provider") or "",
+            runtime_kwargs.get("base_url") or "",
+            runtime_kwargs.get("api_mode") or "",
+            bool(override),
+            (override or {}).get("provider", ""),
+            (override or {}).get("model", ""),
+        )
         if override and resolved_session_key:
             model, runtime_kwargs = self._apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
+            )
+            logger.info(
+                "session runtime post-override: session=%s model=%s provider=%s base_url=%s api_mode=%s",
+                resolved_session_key or "",
+                model or "",
+                runtime_kwargs.get("provider") or "",
+                runtime_kwargs.get("base_url") or "",
+                runtime_kwargs.get("api_mode") or "",
             )
 
         # When the config has no model.default but a provider was resolved
@@ -11026,8 +11067,13 @@ class GatewayRunner:
                         if "MEDIA:" in content:
                             for match in re.finditer(r'MEDIA:(\S+)', content):
                                 path = match.group(1).strip().rstrip('",}')
-                                if path and path not in _history_media_paths:
-                                    media_tags.append(f"MEDIA:{path}")
+                                expanded = os.path.expanduser(path) if path else ""
+                                if (
+                                    expanded
+                                    and os.path.isfile(expanded)
+                                    and expanded not in _history_media_paths
+                                ):
+                                    media_tags.append(f"MEDIA:{expanded}")
                             if "[[audio_as_voice]]" in content:
                                 has_voice_directive = True
                 
