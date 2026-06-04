@@ -72,42 +72,53 @@ class _ThreadContextCache:
     parent_text: str = ""  # Raw text of the thread parent (for reply_to_text injection)
 
 
-# Fixed plan-mode row identifiers — rendered once per turn and updated in
-# place; tool calls do NOT add new rows.
+# Plan-mode row identifiers. analyze/respond are fixed bookends; each tool call
+# adds its own `tool-{n}` row in between (paginating across cards when full).
 _PLAN_TITLE = "Working on your request"
 ANALYZE_ID = "analyze"
 ANALYZE_TITLE = "Understand request"
-TOOLS_ID = "tools"
-TOOLS_TITLE = "Use tools if needed"
 RESPOND_ID = "respond"
 RESPOND_TITLE = "Draft response"
-_NO_TOOLS_DETAIL = "No tools needed"
 _DETAIL_LIMIT = 280
-_MAX_TOOL_HISTORY = 8
+_TITLE_LIMIT = 140
+# Slack rejects a plan whose `tasks` array exceeds 50 entries. Each tool call is
+# its own row; we keep a card well under the cap (leaving room for analyze /
+# respond) and roll onto a fresh plan card when a card fills up, so the full
+# tool-call record stays visible across cards — never one card per tool.
+_MAX_TOOLS_PER_CARD = 45
+# Slack caps a streamed message's markdown body at ~12,000 chars. Keep the card
+# body under that; response text beyond it spills into follow-up cards rather
+# than being silently truncated.
+_CARD_BODY_LIMIT = 11000
 
 
 @dataclass
 class _ThinkingCardState:
     """In-flight Slack thinking-steps card for one (channel, thread) pair.
 
-    Plan mode: a card holds three fixed rows (analyze/tools/respond) for the
-    whole turn. Tool calls update the `tools` row in place by re-rendering
-    `tool_history` as a bulleted markdown list — they never add new rows.
-    The card body stays empty until finalize, when the final assistant
-    response is appended as a single `markdown_text` chunk.
+    Plan mode: an `analyze` row folds the reasoning, each tool call becomes its
+    own `task_update` row (the full tool-call record), and a `respond` row
+    tracks the answer. When a card fills up (`_MAX_TOOLS_PER_CARD` tool rows)
+    the next tool rolls onto a fresh plan card — so a long tool record paginates
+    across cards instead of being capped. `card_ts` always points at the
+    *current* (latest) card; the answer body streams into it at finalize.
     """
     card_ts: str
     channel_id: str
     thread_ts: str
     team_id: str = ""
     user_id: str = ""
-    # Running list of tool invocations, each `{"name": str, "target": str,
-    # "count": int}`. Consecutive identical entries collapse via count++.
-    tool_history: list = field(default_factory=list)
-    # Per-row status tracking ("pending" | "in_progress" | "complete").
-    analyze_status: str = "in_progress"
-    tools_status: str = "pending"
-    respond_status: str = "pending"
+    # Plan progress.
+    analyze_done: bool = False
+    respond_started: bool = False
+    used_tools: bool = False
+    # Per-tool rows. `tool_seq` gives stable ids (`tool-{n}`); `tools_on_card`
+    # tracks how many rows the current card holds for pagination; the active
+    # row stays `in_progress` until the next tool / the answer completes it.
+    tool_seq: int = 0
+    tools_on_card: int = 0
+    active_tool_id: str = ""
+    active_tool_title: str = ""
     closed: bool = False
     # Set True once the stream consumer pushes the model's full response
     # text into the card via append_thinking_text(is_response=True). When
@@ -1049,13 +1060,13 @@ class SlackAdapter(BasePlatformAdapter):
 
     # ----- Thinking-steps card (chat.startStream / appendStream / stopStream) -----
     #
-    # Plan-mode card: one Slack card per agent turn, with three fixed rows
-    # (analyze / tools / respond) that update in place as the agent works.
-    # Tool calls update the `tools` row's `details` field with a re-rendered
-    # bulleted history; they never add new rows. The card body stays empty
-    # until finalize, when the final assistant response is appended.
-    #   start_thinking_card     → chat.startStream      (opens the card)
-    #   record_tool_call        → chat.appendStream     (updates tools row)
+    # Plan-mode card: an `analyze` row, one `tool-{n}` row per tool call (the
+    # full tool-call record), and a `respond` row. When a card fills up
+    # (_MAX_TOOLS_PER_CARD rows) the next tool rolls onto a fresh plan card, so
+    # a long record paginates across cards. The body stays empty until finalize,
+    # when the final assistant response is appended (and itself paginates if long).
+    #   start_thinking_card     → chat.startStream      (opens card 0)
+    #   record_tool_call        → chat.appendStream / startStream (adds a tool row; rolls card when full)
     #   append_thinking_text    → chat.appendStream     (response body only)
     #   finalize_thinking_card  → chat.stopStream       (closes the card)
     #
@@ -1137,12 +1148,12 @@ class SlackAdapter(BasePlatformAdapter):
             )
             return None
 
-        # Plan mode: open the card with a `plan_update` and three fixed
-        # `task_update` rows (analyze / tools / respond). The `analyze` row
-        # starts in_progress so the user sees activity immediately; the
-        # other two stay `pending` until the agent advances. Note: Slack
-        # rejects requests that pass *both* `markdown_text` and `chunks`
-        # — we use chunks only. The card body stays empty until finalize.
+        # Plan mode: open the card with a `plan_update` and just the `analyze`
+        # row in_progress. Tool rows are appended live as the agent calls tools
+        # (one row each), and the `respond` row is added when the answer starts
+        # — so the rows render in execution order (analyze → tools → respond).
+        # Note: Slack rejects requests that pass *both* `markdown_text` and
+        # `chunks`; we use chunks only. The body stays empty until finalize.
         del opening_text  # plan-mode card has no free-form opening text
         kwargs: Dict[str, Any] = {
             "channel": chat_id,
@@ -1155,18 +1166,6 @@ class SlackAdapter(BasePlatformAdapter):
                     "id": ANALYZE_ID,
                     "title": ANALYZE_TITLE,
                     "status": "in_progress",
-                },
-                {
-                    "type": "task_update",
-                    "id": TOOLS_ID,
-                    "title": TOOLS_TITLE,
-                    "status": "pending",
-                },
-                {
-                    "type": "task_update",
-                    "id": RESPOND_ID,
-                    "title": RESPOND_TITLE,
-                    "status": "pending",
                 },
             ],
         }
@@ -1267,24 +1266,13 @@ class SlackAdapter(BasePlatformAdapter):
         return cls._limit_detail(target) if target else ""
 
     @classmethod
-    def _render_tool_details(cls, history: list) -> str:
-        """Render the tool history list as a bulleted markdown string.
-
-        The list is already run-length-collapsed by `record_tool_call`.
-        """
-        if not history:
-            return ""
-        lines: list = []
-        for entry in history[-_MAX_TOOL_HISTORY:]:
-            name = entry.get("name") or "tool"
-            target = entry.get("target") or ""
-            count = int(entry.get("count") or 1)
-            label = f"{name} x{count}" if count > 1 else name
-            if target:
-                lines.append(f"- {label}: {target}")
-            else:
-                lines.append(f"- {label}")
-        return cls._limit_detail("\n".join(lines))
+    def _tool_row_title(cls, name: str, target: str) -> str:
+        """Title for a single tool row: ``name`` or ``name: target`` (clipped)."""
+        title = f"{name}: {target}" if target else name
+        one_line = " ".join(title.split())
+        if len(one_line) <= _TITLE_LIMIT:
+            return one_line
+        return one_line[: _TITLE_LIMIT - 1].rstrip() + "…"
 
     async def record_tool_call(
         self,
@@ -1294,13 +1282,14 @@ class SlackAdapter(BasePlatformAdapter):
         tool_name: str,
         args: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Record a tool invocation into the active card's `tools` row.
+        """Render a tool invocation as its own row in the active card.
 
-        Appends the call to `state.tool_history` (with run-length
-        collapsing of consecutive identical entries) and re-renders the
-        whole list as the `details` field of the `tools` row. The first
-        tool call also flips `analyze` → complete and `tools` →
-        in_progress, all in a single appendStream batch.
+        Each call becomes a `task_update` row (`tool-{n}`): the previously
+        running tool flips to complete, the new one to in_progress. The first
+        tool call also flips `analyze` → complete. When the current card is
+        full (`_MAX_TOOLS_PER_CARD` rows) the call rolls onto a fresh plan card
+        so the complete tool record paginates across cards instead of being
+        capped — never one card per tool.
 
         Returns True if the chunk was sent, False if there was no active
         card or the API call failed.
@@ -1311,44 +1300,86 @@ class SlackAdapter(BasePlatformAdapter):
 
         clean_name = (tool_name or "tool").strip() or "tool"
         target = self._tool_target(args)
+        state.used_tools = True
 
-        # Run-length-collapse consecutive identical entries.
-        if (
-            state.tool_history
-            and state.tool_history[-1].get("name") == clean_name
-            and state.tool_history[-1].get("target") == target
-        ):
-            state.tool_history[-1]["count"] = int(state.tool_history[-1].get("count") or 1) + 1
-        else:
-            state.tool_history.append({
-                "name": clean_name,
-                "target": target,
-                "count": 1,
-            })
-
-        chunks: list = []
-        # First tool call advances the plan: analyze → complete, tools → in_progress.
-        if state.analyze_status != "complete":
-            state.analyze_status = "complete"
-            chunks.append({
+        # Complete the analyze row (first tool) and the previously running tool.
+        pending: list = []
+        if not state.analyze_done:
+            state.analyze_done = True
+            pending.append({
                 "type": "task_update",
                 "id": ANALYZE_ID,
                 "title": ANALYZE_TITLE,
                 "status": "complete",
             })
-        if state.tools_status != "in_progress":
-            state.tools_status = "in_progress"
-        details = self._render_tool_details(state.tool_history)
-        tools_chunk: Dict[str, Any] = {
+        if state.active_tool_id:
+            pending.append({
+                "type": "task_update",
+                "id": state.active_tool_id,
+                "title": state.active_tool_title,
+                "status": "complete",
+            })
+            state.active_tool_id = ""
+
+        # Paginate: flush completions on the current card, then roll to a new one.
+        if state.tools_on_card >= _MAX_TOOLS_PER_CARD:
+            if pending and not await self._append_chunks(state, pending):
+                return False
+            pending = []
+            if not await self._open_tool_card(state):
+                return False
+
+        state.tool_seq += 1
+        row_id = f"tool-{state.tool_seq}"
+        row_title = self._tool_row_title(clean_name, target)
+        state.active_tool_id = row_id
+        state.active_tool_title = row_title
+        state.tools_on_card += 1
+        pending.append({
             "type": "task_update",
-            "id": TOOLS_ID,
-            "title": TOOLS_TITLE,
+            "id": row_id,
+            "title": row_title,
             "status": "in_progress",
+        })
+        return await self._append_chunks(state, pending)
+
+    async def _open_tool_card(self, state: "_ThinkingCardState") -> bool:
+        """Close the current card and open a fresh plan card to continue tools.
+
+        Returns True on success; False if the new card couldn't be opened (the
+        caller then aborts the card and falls back to legacy progress).
+        """
+        client = self._get_client(state.channel_id)
+        # Close the now-full card (its rows are already finalized in place).
+        try:
+            await client.chat_stopStream(channel=state.channel_id, ts=state.card_ts, chunks=[])
+        except Exception as e:
+            logger.warning(
+                "[Slack] failed to close full card %s before paginating: %s",
+                state.card_ts, e,
+            )
+        start_kwargs: Dict[str, Any] = {
+            "channel": state.channel_id,
+            "thread_ts": state.thread_ts,
+            "task_display_mode": "plan",
+            "chunks": [{"type": "plan_update", "title": _PLAN_TITLE}],
         }
-        if details:
-            tools_chunk["details"] = details
-        chunks.append(tools_chunk)
-        return await self._append_chunks(state, chunks)
+        if state.team_id:
+            start_kwargs["recipient_team_id"] = state.team_id
+        if state.user_id:
+            start_kwargs["recipient_user_id"] = state.user_id
+        try:
+            resp = await client.chat_startStream(**start_kwargs)
+        except Exception as e:
+            logger.warning("[Slack] failed to open continuation card: %s", e)
+            return False
+        new_ts = (resp or {}).get("ts")
+        if not new_ts:
+            return False
+        state.card_ts = new_ts
+        state.tools_on_card = 0
+        self._bot_message_ts.add(new_ts)
+        return True
 
     async def append_thinking_text(
         self,
@@ -1376,13 +1407,116 @@ class SlackAdapter(BasePlatformAdapter):
         state = self.get_thinking_card(chat_id, thread_ts)
         if not state:
             return False
+        # Advance the plan before the answer: analyze → complete (if no tools
+        # ran), the last running tool → complete, and respond → in_progress.
+        progress: list = []
+        if not state.analyze_done:
+            state.analyze_done = True
+            progress.append({
+                "type": "task_update", "id": ANALYZE_ID,
+                "title": ANALYZE_TITLE, "status": "complete",
+            })
+        if state.active_tool_id:
+            progress.append({
+                "type": "task_update", "id": state.active_tool_id,
+                "title": state.active_tool_title, "status": "complete",
+            })
+            state.active_tool_id = ""
+        if not state.respond_started:
+            state.respond_started = True
+            progress.append({
+                "type": "task_update", "id": RESPOND_ID,
+                "title": RESPOND_TITLE, "status": "in_progress",
+            })
+        if progress:
+            await self._append_chunks(state, progress)
+        # Don't silently truncate a long answer: the first segment goes into the
+        # card body, the rest spills into follow-up cards so no content is lost.
+        # truncate_message preserves code fences and adds "(1/N)" indicators when
+        # it actually splits.
+        head, *tail = self.truncate_message(text, _CARD_BODY_LIMIT)
         ok = await self._append_chunks(
             state,
-            [{"type": "markdown_text", "text": text[:11000]}],
+            [{"type": "markdown_text", "text": head}],
         )
         if ok:
             state.streamed_full_response = True
+            if tail:
+                await self._continue_answer_in_cards(state, tail)
         return ok
+
+    async def _continue_answer_in_cards(self, state: "_ThinkingCardState", segments: list) -> None:
+        """Continue an over-long answer in follow-up streamed cards, in-thread.
+
+        The card body is capped at Slack's streamed-markdown limit, so an answer
+        longer than one card spills into additional cards rather than being
+        truncated. Each segment (already sized under ``_CARD_BODY_LIMIT`` by
+        ``truncate_message``) becomes its own streamed message
+        (startStream → stopStream) in the same thread, keeping the card styling.
+        If a card can't be opened (e.g. missing recipient identity in a
+        channel), we fall back to a plain threaded reply so content is never
+        lost.
+        """
+        if not segments:
+            return
+        client = self._get_client(state.channel_id)
+        recipient_ok = bool(state.team_id and state.user_id)
+        can_card = recipient_ok or not self._channel_needs_recipient(state.channel_id)
+        for seg in segments:
+            ts = await self._emit_continuation_card(client, state, seg) if can_card else None
+            if not ts:
+                ts = await self._emit_continuation_reply(client, state, seg)
+            if ts:
+                self._bot_message_ts.add(ts)
+
+    async def _emit_continuation_card(
+        self, client: Any, state: "_ThinkingCardState", seg: str,
+    ) -> Optional[str]:
+        """Open a streamed card carrying one answer segment; None on failure."""
+        start_kwargs: Dict[str, Any] = {
+            "channel": state.channel_id,
+            "thread_ts": state.thread_ts,
+        }
+        if state.team_id:
+            start_kwargs["recipient_team_id"] = state.team_id
+        if state.user_id:
+            start_kwargs["recipient_user_id"] = state.user_id
+        try:
+            resp = await client.chat_startStream(**start_kwargs)
+            ts = (resp or {}).get("ts")
+            if not ts:
+                return None
+            await client.chat_stopStream(
+                channel=state.channel_id,
+                ts=ts,
+                chunks=[{"type": "markdown_text", "text": seg}],
+            )
+            return ts
+        except Exception as e:
+            logger.warning(
+                "[Slack] answer continuation card failed for %s: %s; "
+                "falling back to plain reply", state.card_ts, e,
+            )
+            return None
+
+    async def _emit_continuation_reply(
+        self, client: Any, state: "_ThinkingCardState", seg: str,
+    ) -> Optional[str]:
+        """Fallback: post one answer segment as a plain threaded reply."""
+        try:
+            resp = await client.chat_postMessage(
+                channel=state.channel_id,
+                thread_ts=state.thread_ts,
+                text=self.format_message(seg),
+                mrkdwn=True,
+            )
+            return (resp or {}).get("ts")
+        except Exception as e:
+            logger.warning(
+                "[Slack] answer continuation reply failed for %s: %s",
+                state.card_ts, e,
+            )
+            return None
 
     async def _append_chunks(
         self,
@@ -1416,12 +1550,12 @@ class SlackAdapter(BasePlatformAdapter):
     ) -> bool:
         """Close the active thinking-steps card via chat.stopStream.
 
-        Plan-mode finalize: emit one batch with all three rows marked
-        `complete` (rendering the final tool history into `tools` if any
-        tools ran), then append `summary` as a markdown_text chunk —
-        unless the response was already streamed into the card via
-        append_thinking_text(is_response=True), in which case the caller
-        passes `summary=None` and the body stays as the streamed text.
+        Plan-mode finalize on the *current* card: mark the analyze row complete
+        (if no tools ran), the last running tool row complete, and the respond
+        row complete, then append `summary` as a markdown_text chunk — unless
+        the response was already streamed into the card via
+        append_thinking_text(is_response=True), in which case the caller passes
+        `summary=None` and the body stays as the streamed text.
 
         `blocks` (optional) are Block Kit blocks rendered beneath the
         streamed body — typical use is feedback / approval buttons.
@@ -1431,43 +1565,40 @@ class SlackAdapter(BasePlatformAdapter):
             return False
 
         chunks: list = []
-        # Row 1 — analyze: always complete.
-        if state.analyze_status != "complete":
-            state.analyze_status = "complete"
+        # analyze: complete (no-op visually if a tool already completed it).
+        if not state.analyze_done:
+            state.analyze_done = True
         chunks.append({
             "type": "task_update",
             "id": ANALYZE_ID,
             "title": ANALYZE_TITLE,
             "status": "complete",
         })
-        # Row 2 — tools: complete with final rendered history (or
-        # "No tools needed" if the agent didn't call any).
-        used_tools = bool(state.tool_history)
-        tools_chunk: Dict[str, Any] = {
-            "type": "task_update",
-            "id": TOOLS_ID,
-            "title": TOOLS_TITLE,
-            "status": "complete",
-        }
-        if used_tools:
-            details = self._render_tool_details(state.tool_history)
-            if details:
-                tools_chunk["details"] = details
-        else:
-            tools_chunk["details"] = _NO_TOOLS_DETAIL
-        state.tools_status = "complete"
-        chunks.append(tools_chunk)
-        # Row 3 — respond: complete.
-        state.respond_status = "complete"
+        # Close the last still-running tool row, if any.
+        if state.active_tool_id:
+            chunks.append({
+                "type": "task_update",
+                "id": state.active_tool_id,
+                "title": state.active_tool_title,
+                "status": "complete",
+            })
+            state.active_tool_id = ""
+        # respond: complete (the row is appended here if the answer never
+        # streamed in, so it always renders on the final card).
+        state.respond_started = True
         chunks.append({
             "type": "task_update",
             "id": RESPOND_ID,
             "title": RESPOND_TITLE,
             "status": "complete",
         })
-        # Final answer body (skipped when streamed via on_delta).
+        # Final answer body (skipped when streamed via on_delta). Split a long
+        # answer instead of truncating: the first segment closes the card, the
+        # rest is posted as threaded continuation replies after stopStream.
+        overflow_tail: list = []
         if summary:
-            chunks.append({"type": "markdown_text", "text": summary[:11000]})
+            head, *overflow_tail = self.truncate_message(summary, _CARD_BODY_LIMIT)
+            chunks.append({"type": "markdown_text", "text": head})
 
         client = self._get_client(state.channel_id)
         kwargs: Dict[str, Any] = {
@@ -1490,6 +1621,8 @@ class SlackAdapter(BasePlatformAdapter):
 
         state.closed = True
         self._thinking_cards.pop((state.channel_id, state.thread_ts), None)
+        if ok and overflow_tail:
+            await self._continue_answer_in_cards(state, overflow_tail)
         return ok
 
     async def abort_thinking_card(self, chat_id: str, thread_ts: str) -> None:

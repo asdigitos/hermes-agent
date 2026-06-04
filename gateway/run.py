@@ -14837,9 +14837,9 @@ class GatewayRunner:
             """Drain progress_queue into the Slack plan-mode thinking card.
 
             Each tool-started event triggers `record_tool_call`, which
-            re-renders the running tool history into the `tools` row's
-            `details` field. No new rows are added; the card has the
-            three fixed rows opened by start_thinking_card.
+            adds the tool as its own row in the card (paginating onto a
+            fresh card when the current one fills up). The full tool-call
+            record stays visible across cards.
 
             The card is opened by the caller; we own the lifecycle of
             updates here and leave finalize to SlackAdapter.send() (it
