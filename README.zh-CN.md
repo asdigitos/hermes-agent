@@ -12,6 +12,12 @@
   <a href="README.md"><img src="https://img.shields.io/badge/Lang-English-lightgrey?style=for-the-badge" alt="English"></a>
 </p>
 
+> ### ⚠️ Fork 提示 —— `asdigitos/hermes-agent`
+>
+> 这是 `NousResearch/hermes-agent` 的 **asdigitos 下游 fork**。一个 cronjob 会把上游同步到本 fork；本地安装请始终跟随 **本 fork 的 `origin/main`**，而不是上游。
+>
+> **已部署的安装不要用 `git pull` 或 `hermes update` 刷新** —— 那两个命令的语义是面向上游的。请用下面 [**Fork 部署流程**](#fork-部署流程-asdigitos) 里的 clean-refresh。
+
 **由 [Nous Research](https://nousresearch.com) 构建的自进化 AI 代理。** 它是唯一内置学习闭环的智能代理——从经验中创建技能，在使用中改进技能，主动持久化知识，搜索过往对话，并在跨会话中逐步构建对你的深度理解。可以在 $5 的 VPS 上运行，也可以在 GPU 集群上运行，或者使用几乎零成本的 Serverless 基础设施。它不绑定你的笔记本——你可以在 Telegram 上与它对话，而它在云端 VM 上工作。
 
 支持任意模型——[Nous Portal](https://portal.nousresearch.com)、[OpenRouter](https://openrouter.ai)（200+ 模型）、[NVIDIA NIM](https://build.nvidia.com)（Nemotron）、[小米 MiMo](https://platform.xiaomimimo.com)、[z.ai/GLM](https://z.ai)、[Kimi/Moonshot](https://platform.moonshot.ai)、[MiniMax](https://www.minimax.io)、[Hugging Face](https://huggingface.co)、OpenAI，或自定义端点。使用 `hermes model` 即可切换——无需改代码，无锁定。
@@ -25,6 +31,74 @@
 <tr><td><b>随处运行</b></td><td>六种终端后端——本地、Docker、SSH、Daytona、Singularity 和 Modal。Daytona 和 Modal 提供 Serverless 持久化——代理环境空闲时休眠、按需唤醒，空闲期间几乎零成本。$5 VPS 或 GPU 集群都能跑。</td></tr>
 <tr><td><b>研究就绪</b></td><td>批量轨迹生成、轨迹压缩——用于训练下一代工具调用模型。</td></tr>
 </table>
+
+---
+
+## Fork 部署流程 (`asdigitos`)
+
+> 用于刷新已经跟踪 `asdigitos` fork 的现有 `~/.hermes/hermes-agent` 检出。全新安装请用下面的 [快速安装](#快速安装)。
+
+Fork 的 `origin/main` 是已部署安装的唯一真源。cronjob 负责把上游同步进 fork，但本地刷新永远只对齐 `origin/main` —— 不要对齐 `upstream/main`，也不要用 `hermes update`。
+
+### 标准刷新流程
+
+```bash
+cd ~/.hermes/hermes-agent
+
+# 1) 写回滚点（当前 SHA，动手前）
+cat > ~/.hermes/local-installation-last-known-good.env <<EOF
+HERMES_ROLLBACK_BRANCH=$(git branch --show-current)
+HERMES_ROLLBACK_SHA=$(git rev-parse HEAD)
+EOF
+
+# 2) 确认工作区干净 —— 不干净先 stash
+git status --short --branch
+# git stash push -u -m "pre-deploy-$(date +%Y%m%d-%H%M%S)"   # 仅在有未提交改动时
+
+# 3) 拉 fork main，本地 main 对齐
+git fetch origin main --prune
+git switch main || git switch -c main origin/main
+git reset --hard origin/main
+
+# 4) 重装 editable + 健康检查
+./venv/bin/python -m pip install -e .
+./venv/bin/hermes --version
+./venv/bin/hermes doctor
+
+# 5) 网关 clean refresh（重写 launchd / systemd 服务定义）
+hermes gateway stop
+hermes gateway install --force
+hermes gateway start
+hermes gateway status
+```
+
+### 为什么用 `install --force`，不用 `restart`
+
+- `hermes gateway restart` —— 仅适合配置或小代码改动；只是重启已有 service。
+- `hermes gateway install --force` —— 切换底层代码 checkout 时必须用。会重写 launchd/systemd 单元，刷新 wrapper 路径、venv 引用、环境变量。fork 部署一律走这个。
+
+### 回滚
+
+```bash
+source ~/.hermes/local-installation-last-known-good.env
+
+cd ~/.hermes/hermes-agent
+git switch "$HERMES_ROLLBACK_BRANCH" 2>/dev/null || git switch --detach "$HERMES_ROLLBACK_SHA"
+git reset --hard "$HERMES_ROLLBACK_SHA"
+
+./venv/bin/python -m pip install -e .
+hermes gateway stop
+hermes gateway install --force
+hermes gateway start
+```
+
+### 常规原则
+
+- ✅ 永远只对 `origin/main`（本 fork）做对齐。
+- ❌ 已部署的安装不要 `hermes update` —— 那是给上游用的。
+- ❌ 不要 `git pull upstream main` 来刷新运行环境 —— 这是 cronjob 的活。
+- ✅ 写入回滚 env 文件之后才能 reset。
+- ✅ 代码 checkout 移动时一律 `gateway install --force`，不要只 `restart`。
 
 ---
 

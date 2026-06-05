@@ -12,6 +12,12 @@
   <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/Lang-中文-red?style=for-the-badge" alt="中文"></a>
 </p>
 
+> ### ⚠️ Fork notice — `asdigitos/hermes-agent`
+>
+> This is the **asdigitos downstream fork** of `NousResearch/hermes-agent`. A cronjob mirrors upstream into this fork; local installations should track **this fork's `origin/main`**, not upstream.
+>
+> **Do NOT run `git pull` or `hermes update` to refresh a deployed install** — those follow upstream semantics. Use the clean-refresh flow in [**Fork Deployment**](#fork-deployment-asdigitos) below.
+
 **The self-improving AI agent built by [Nous Research](https://nousresearch.com).** It's the only agent with a built-in learning loop — it creates skills from experience, improves them during use, nudges itself to persist knowledge, searches its own past conversations, and builds a deepening model of who you are across sessions. Run it on a $5 VPS, a GPU cluster, or serverless infrastructure that costs nearly nothing when idle. It's not tied to your laptop — talk to it from Telegram while it works on a cloud VM.
 
 Use any model you want — [Nous Portal](https://portal.nousresearch.com), [OpenRouter](https://openrouter.ai) (200+ models), [NovitaAI](https://novita.ai) (AI-native cloud for Model API, Agent Sandbox, and GPU Cloud), [NVIDIA NIM](https://build.nvidia.com) (Nemotron), [Xiaomi MiMo](https://platform.xiaomimimo.com), [z.ai/GLM](https://z.ai), [Kimi/Moonshot](https://platform.moonshot.ai), [MiniMax](https://www.minimax.io), [Hugging Face](https://huggingface.co), OpenAI, or your own endpoint. Switch with `hermes model` — no code changes, no lock-in.
@@ -25,6 +31,74 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), [Open
 <tr><td><b>Runs anywhere, not just your laptop</b></td><td>Seven terminal backends — local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox. Daytona and Modal offer serverless persistence — your agent's environment hibernates when idle and wakes on demand, costing nearly nothing between sessions. Run it on a $5 VPS or a GPU cluster.</td></tr>
 <tr><td><b>Research-ready</b></td><td>Batch trajectory generation, trajectory compression for training the next generation of tool-calling models.</td></tr>
 </table>
+
+---
+
+## Fork Deployment (`asdigitos`)
+
+> Use this flow to refresh an existing `~/.hermes/hermes-agent` checkout that already tracks the `asdigitos` fork. For a brand-new install, use the upstream [Quick Install](#quick-install) below.
+
+The fork's `origin/main` is the source of truth for deployed installs. A cronjob keeps it synced with upstream, but local refreshes must always align with `origin/main` directly — never with `upstream/main` and never via `hermes update`.
+
+### Standard refresh
+
+```bash
+cd ~/.hermes/hermes-agent
+
+# 1) Record rollback point (current SHA, before changing anything)
+cat > ~/.hermes/local-installation-last-known-good.env <<EOF
+HERMES_ROLLBACK_BRANCH=$(git branch --show-current)
+HERMES_ROLLBACK_SHA=$(git rev-parse HEAD)
+EOF
+
+# 2) Confirm working tree is clean — if not, stash first
+git status --short --branch
+# git stash push -u -m "pre-deploy-$(date +%Y%m%d-%H%M%S)"   # only if dirty
+
+# 3) Pull fork main and align local main to it
+git fetch origin main --prune
+git switch main || git switch -c main origin/main
+git reset --hard origin/main
+
+# 4) Reinstall editable + sanity check
+./venv/bin/python -m pip install -e .
+./venv/bin/hermes --version
+./venv/bin/hermes doctor
+
+# 5) Clean-refresh the gateway service (rewrites launchd / systemd unit)
+hermes gateway stop
+hermes gateway install --force
+hermes gateway start
+hermes gateway status
+```
+
+### Why `install --force` (not `restart`)
+
+- `hermes gateway restart` — fine for config tweaks or small code changes; just restarts the existing service unit.
+- `hermes gateway install --force` — required when switching the underlying code checkout. Rewrites the launchd/systemd unit so wrapper paths, venv references, and env are all refreshed. Use this for every fork-deploy.
+
+### Rollback
+
+```bash
+source ~/.hermes/local-installation-last-known-good.env
+
+cd ~/.hermes/hermes-agent
+git switch "$HERMES_ROLLBACK_BRANCH" 2>/dev/null || git switch --detach "$HERMES_ROLLBACK_SHA"
+git reset --hard "$HERMES_ROLLBACK_SHA"
+
+./venv/bin/python -m pip install -e .
+hermes gateway stop
+hermes gateway install --force
+hermes gateway start
+```
+
+### Rules of thumb
+
+- ✅ Refresh against `origin/main` (this fork).
+- ❌ Don't run `hermes update` on a deployed install — its semantics target upstream.
+- ❌ Don't `git pull upstream main` to refresh the runtime — the cronjob does that for the fork.
+- ✅ Always write the rollback env file before resetting.
+- ✅ Run `gateway install --force` (not `restart`) when the code checkout moved.
 
 ---
 
