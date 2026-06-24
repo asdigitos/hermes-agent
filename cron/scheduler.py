@@ -533,7 +533,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
-    media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
+    media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(
+        delivery_content,
+        require_file_exists=False,
+    )
 
     try:
         config = load_gateway_config()
