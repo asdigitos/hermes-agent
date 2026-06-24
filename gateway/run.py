@@ -1414,7 +1414,7 @@ class GatewayRunner:
         if not hasattr(asyncio, "start_unix_server"):
             logger.info("Gateway inject control socket unavailable on this platform")
             return
-        if self._inject_server is not None:
+        if getattr(self, "_inject_server", None) is not None:
             return
 
         from gateway.inject import ensure_private_socket_parent, inject_socket_path
@@ -1443,7 +1443,7 @@ class GatewayRunner:
             self._inject_socket_path = None
 
     async def _stop_inject_control_socket(self) -> None:
-        server = self._inject_server
+        server = getattr(self, "_inject_server", None)
         self._inject_server = None
         if server is not None:
             server.close()
@@ -1451,7 +1451,7 @@ class GatewayRunner:
                 await server.wait_closed()
             except Exception as exc:
                 logger.debug("Gateway inject control socket close error: %s", exc)
-        path = self._inject_socket_path
+        path = getattr(self, "_inject_socket_path", None)
         self._inject_socket_path = None
         if path is not None:
             try:
@@ -5222,7 +5222,9 @@ class GatewayRunner:
 
             self._running = False
             self._draining = True
-            await self._stop_inject_control_socket()
+            stop_inject_control_socket = getattr(self, "_stop_inject_control_socket", None)
+            if stop_inject_control_socket is not None:
+                await stop_inject_control_socket()
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.
