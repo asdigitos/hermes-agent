@@ -2088,7 +2088,7 @@ class BasePlatformAdapter(ABC):
         return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
 
     @staticmethod
-    def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
+    def extract_media(content: str, *, require_file_exists: bool = True) -> Tuple[List[Tuple[str, bool]], str]:
         """
         Extract MEDIA:<path> tags and [[audio_as_voice]] directives from response text.
 
@@ -2109,6 +2109,10 @@ class BasePlatformAdapter(ABC):
 
         Args:
             content: The response text to scan.
+            require_file_exists: When true, only extract tags for files that
+                already exist on disk. Cron delivery sets this false because it
+                must strip explicit MEDIA directives before send-time file
+                validation.
 
         Returns:
             Tuple of (list of (path, is_voice) pairs, cleaned content with tags removed).
@@ -2137,10 +2141,13 @@ class BasePlatformAdapter(ABC):
             if path:
                 expanded = os.path.expanduser(path)
                 # Only treat MEDIA: tags as deliverable attachments when they
-                # point to a real file. This prevents explanatory text like
-                # `MEDIA:/absolute/path` in skills/docs from turning into bogus
-                # Slack uploads such as the root directory fallback `📎 File: /`.
-                if os.path.isfile(expanded):
+                # point to a real file by default. This prevents explanatory
+                # text like `MEDIA:/absolute/path` in skills/docs from turning
+                # into bogus Slack uploads such as the root directory fallback
+                # `📎 File: /`. Cron delivery opts out because MEDIA tags in
+                # scheduled output are explicit delivery directives and should
+                # be stripped before send-time file validation.
+                if not require_file_exists or os.path.isfile(expanded):
                     media.append((expanded, has_voice_tag))
 
         # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)

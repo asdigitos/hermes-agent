@@ -9921,6 +9921,26 @@ def main():
     # gateway setup
     gateway_subparsers.add_parser("setup", help="Configure messaging platforms")
 
+    # gateway inject
+    gateway_inject = gateway_subparsers.add_parser(
+        "inject",
+        help="Inject a local message into a running gateway conversation",
+    )
+    gateway_inject.add_argument(
+        "--platform", required=True, help="Target platform, e.g. slack"
+    )
+    gateway_inject.add_argument(
+        "--chat-id", required=True, help="Target chat or channel ID"
+    )
+    gateway_inject.add_argument("--thread-id", help="Target thread/topic ID")
+    gateway_inject.add_argument("--text", required=True, help="Message text to inject")
+    gateway_inject.add_argument(
+        "--chat-type",
+        choices=("dm", "group", "channel", "thread"),
+        help="Gateway chat type (default: channel when --thread-id is set, otherwise dm)",
+    )
+    gateway_inject.add_argument("--message-id", help="Synthetic triggering message ID")
+
     # gateway migrate-legacy
     gateway_migrate_legacy = gateway_subparsers.add_parser(
         "migrate-legacy",

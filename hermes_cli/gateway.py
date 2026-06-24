@@ -2110,22 +2110,28 @@ def _build_service_path_dirs(project_root: Path | None = None) -> list[str]:
 
     candidates = []
 
+    def _is_dir(path: Path) -> bool:
+        try:
+            return path.is_dir()
+        except PermissionError:
+            return False
+
     venv_bin = project_root / "venv" / "bin"
-    if venv_bin.is_dir():
+    if _is_dir(venv_bin):
         candidates.append(str(venv_bin))
     elif sys.prefix != sys.base_prefix:
         candidates.append(str(Path(sys.prefix) / "bin"))
 
     node_bin = project_root / "node_modules" / ".bin"
-    if node_bin.is_dir():
+    if _is_dir(node_bin):
         candidates.append(str(node_bin))
 
     hermes_home = get_hermes_home()
     hermes_node = hermes_home / "node" / "bin"
-    if hermes_node.is_dir():
+    if _is_dir(hermes_node):
         candidates.append(str(hermes_node))
     hermes_nm = hermes_home / "node_modules" / ".bin"
-    if hermes_nm.is_dir():
+    if _is_dir(hermes_nm):
         candidates.append(str(hermes_nm))
 
     return candidates
@@ -4998,6 +5004,41 @@ def gateway_setup():
     print()
 
 
+def gateway_inject(args):
+    """Inject a local CLI message into a running gateway session."""
+    platform = str(getattr(args, "platform", "") or "").strip().lower()
+    chat_id = str(getattr(args, "chat_id", "") or "").strip()
+    thread_id = str(getattr(args, "thread_id", "") or "").strip()
+    text = str(getattr(args, "text", "") or "")
+    chat_type = str(getattr(args, "chat_type", "") or "").strip().lower()
+    message_id = str(getattr(args, "message_id", "") or "").strip()
+
+    payload = {
+        "platform": platform,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "text": text,
+    }
+    if chat_type:
+        payload["chat_type"] = chat_type
+    if message_id:
+        payload["message_id"] = message_id
+
+    from gateway.inject import send_inject_request
+
+    result = send_inject_request(payload)
+    if not result.get("ok"):
+        print_error(result.get("error") or "Gateway inject failed.")
+        sys.exit(1)
+    if result.get("delivered"):
+        print_success("Injected message and delivered response.")
+    else:
+        print_success("Injected message.")
+    session_key = result.get("session_key")
+    if session_key:
+        print_info(f"  Session: {session_key}")
+
+
 # =============================================================================
 # Main Command Handler
 # =============================================================================
@@ -5036,6 +5077,10 @@ def _gateway_command_inner(args):
 
     if subcmd == "setup":
         gateway_setup()
+        return
+
+    if subcmd == "inject":
+        gateway_inject(args)
         return
 
     # Service management commands

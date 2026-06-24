@@ -1405,6 +1405,172 @@ class GatewayRunner:
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+        self._inject_server: Optional[asyncio.AbstractServer] = None
+        self._inject_socket_path: Optional[Path] = None
+
+
+    async def _start_inject_control_socket(self) -> None:
+        """Start the local-only gateway injection socket."""
+        if not hasattr(asyncio, "start_unix_server"):
+            logger.info("Gateway inject control socket unavailable on this platform")
+            return
+        if getattr(self, "_inject_server", None) is not None:
+            return
+
+        from gateway.inject import ensure_private_socket_parent, inject_socket_path
+
+        path = inject_socket_path()
+        ensure_private_socket_parent(path)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("Could not remove stale gateway inject socket: %s", exc)
+            return
+
+        try:
+            self._inject_server = await asyncio.start_unix_server(
+                self._handle_inject_client,
+                path=str(path),
+            )
+            os.chmod(path, 0o600)
+            self._inject_socket_path = path
+            logger.info("Gateway inject control socket listening at %s", path)
+        except OSError as exc:
+            logger.warning("Failed to start gateway inject control socket: %s", exc)
+            self._inject_server = None
+            self._inject_socket_path = None
+
+    async def _stop_inject_control_socket(self) -> None:
+        server = getattr(self, "_inject_server", None)
+        self._inject_server = None
+        if server is not None:
+            server.close()
+            try:
+                await server.wait_closed()
+            except Exception as exc:
+                logger.debug("Gateway inject control socket close error: %s", exc)
+        path = getattr(self, "_inject_socket_path", None)
+        self._inject_socket_path = None
+        if path is not None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.debug("Gateway inject socket unlink error: %s", exc)
+
+    async def _handle_inject_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        from gateway.inject import MAX_INJECT_BYTES, loads_request
+
+        try:
+            raw = await reader.readuntil(b"\n")
+            if len(raw) > MAX_INJECT_BYTES:
+                raise ValueError("inject request is too large")
+            payload = loads_request(raw.strip())
+            response = await self.inject_local_message(payload)
+        except asyncio.IncompleteReadError:
+            response = {"ok": False, "error": "Incomplete gateway inject request."}
+        except ValueError as exc:
+            response = {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            logger.exception("Gateway inject request failed")
+            response = {"ok": False, "error": f"Gateway inject failed: {exc}"}
+        try:
+            response_bytes = (
+                json.dumps(response, separators=(",", ":")).encode("utf-8")
+                + b"\n"
+            )
+            writer.write(response_bytes)
+            await writer.drain()
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def inject_local_message(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Inject a locally-authenticated message into a platform session."""
+        platform_name = str(payload.get("platform") or "").strip().lower()
+        chat_id = str(payload.get("chat_id") or "").strip()
+        thread_id = str(payload.get("thread_id") or "").strip() or None
+        text = str(payload.get("text") or "")
+        if not platform_name:
+            return {"ok": False, "error": "platform is required"}
+        if not chat_id:
+            return {"ok": False, "error": "chat_id is required"}
+        if not text.strip():
+            return {"ok": False, "error": "text is required"}
+
+        try:
+            platform = Platform(platform_name)
+        except ValueError:
+            return {"ok": False, "error": f"unknown platform: {platform_name}"}
+
+        adapter = self.adapters.get(platform)
+        if adapter is None:
+            return {"ok": False, "error": f"platform is not connected: {platform.value}"}
+
+        chat_type = str(payload.get("chat_type") or "").strip().lower()
+        if not chat_type:
+            chat_type = "channel" if thread_id else "dm"
+        message_id = str(payload.get("message_id") or "").strip() or None
+        source = SessionSource(
+            platform=platform,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            user_id="local-cli",
+            user_name="Local CLI",
+            thread_id=thread_id,
+            message_id=message_id,
+        )
+        event = MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id=message_id,
+            internal=True,
+        )
+
+        result = await self._handle_message(event)
+        response_text = ""
+        if isinstance(result, dict):
+            response_text = str(result.get("final_response") or "")
+        elif result is not None:
+            response_text = str(result)
+
+        delivered = False
+        if response_text:
+            send_result = await adapter.send(
+                chat_id,
+                response_text,
+                metadata=self._thread_metadata_for_source(
+                    source,
+                    self._reply_anchor_for_event(event),
+                ),
+            )
+            delivered = bool(getattr(send_result, "success", False))
+            if not delivered:
+                return {
+                    "ok": False,
+                    "error": str(
+                        getattr(send_result, "error", "") or "platform send failed"
+                    ),
+                    "response": response_text,
+                }
+
+        return {
+            "ok": True,
+            "delivered": delivered,
+            "response": response_text,
+            "session_key": self._session_key_for_source(source),
+        }
 
 
     def _wire_teams_pipeline_runtime(self) -> None:
@@ -3766,6 +3932,7 @@ class GatewayRunner:
         self._wire_teams_pipeline_runtime()
 
         self._running = True
+        await self._start_inject_control_socket()
         self._update_runtime_status("running")
 
         # Emit gateway:startup hook
@@ -5055,6 +5222,9 @@ class GatewayRunner:
 
             self._running = False
             self._draining = True
+            stop_inject_control_socket = getattr(self, "_stop_inject_control_socket", None)
+            if stop_inject_control_socket is not None:
+                await stop_inject_control_socket()
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.
