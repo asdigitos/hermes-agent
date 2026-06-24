@@ -4998,6 +4998,41 @@ def gateway_setup():
     print()
 
 
+def gateway_inject(args):
+    """Inject a local CLI message into a running gateway session."""
+    platform = str(getattr(args, "platform", "") or "").strip().lower()
+    chat_id = str(getattr(args, "chat_id", "") or "").strip()
+    thread_id = str(getattr(args, "thread_id", "") or "").strip()
+    text = str(getattr(args, "text", "") or "")
+    chat_type = str(getattr(args, "chat_type", "") or "").strip().lower()
+    message_id = str(getattr(args, "message_id", "") or "").strip()
+
+    payload = {
+        "platform": platform,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "text": text,
+    }
+    if chat_type:
+        payload["chat_type"] = chat_type
+    if message_id:
+        payload["message_id"] = message_id
+
+    from gateway.inject import send_inject_request
+
+    result = send_inject_request(payload)
+    if not result.get("ok"):
+        print_error(result.get("error") or "Gateway inject failed.")
+        sys.exit(1)
+    if result.get("delivered"):
+        print_success("Injected message and delivered response.")
+    else:
+        print_success("Injected message.")
+    session_key = result.get("session_key")
+    if session_key:
+        print_info(f"  Session: {session_key}")
+
+
 # =============================================================================
 # Main Command Handler
 # =============================================================================
@@ -5036,6 +5071,10 @@ def _gateway_command_inner(args):
 
     if subcmd == "setup":
         gateway_setup()
+        return
+
+    if subcmd == "inject":
+        gateway_inject(args)
         return
 
     # Service management commands

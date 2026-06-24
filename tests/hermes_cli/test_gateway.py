@@ -165,6 +165,113 @@ def test_run_gateway_windows_detached_absorbs_console_controls(monkeypatch):
     assert (gateway.signal.SIGINT, gateway.signal.SIG_IGN) in signal_calls
 
 
+def test_gateway_inject_sends_local_socket_payload(monkeypatch, capsys):
+    captured = {}
+
+    def fake_send(payload):
+        captured.update(payload)
+        return {
+            "ok": True,
+            "delivered": True,
+            "session_key": "agent:main:slack:channel:C123:171.1",
+        }
+
+    monkeypatch.setattr("gateway.inject.send_inject_request", fake_send)
+
+    args = SimpleNamespace(
+        platform="slack",
+        chat_id="C123",
+        thread_id="171.1",
+        text="hello",
+        chat_type="channel",
+        message_id="local-1",
+    )
+    gateway.gateway_inject(args)
+
+    assert captured == {
+        "platform": "slack",
+        "chat_id": "C123",
+        "thread_id": "171.1",
+        "text": "hello",
+        "chat_type": "channel",
+        "message_id": "local-1",
+    }
+    out = capsys.readouterr().out
+    assert "Injected message and delivered response." in out
+    assert "agent:main:slack:channel:C123:171.1" in out
+
+
+def test_gateway_inject_exits_nonzero_on_socket_error(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "gateway.inject.send_inject_request",
+        lambda payload: {"ok": False, "error": "Gateway inject socket not found."},
+    )
+    args = SimpleNamespace(
+        platform="slack",
+        chat_id="C123",
+        thread_id="171.1",
+        text="hello",
+        chat_type=None,
+        message_id=None,
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        gateway.gateway_inject(args)
+
+    assert excinfo.value.code == 1
+    assert "Gateway inject socket not found." in capsys.readouterr().out
+
+
+def test_main_parses_gateway_inject(monkeypatch):
+    import agent.shell_hooks as shell_hooks_mod
+    import hermes_cli.config as config_mod
+    import hermes_cli.main as main_mod
+    import hermes_cli.plugins as plugins_mod
+    import tools.mcp_tool as mcp_tool_mod
+
+    captured = {}
+
+    def fake_gateway_command(args):
+        captured["args"] = args
+
+    monkeypatch.setattr(plugins_mod, "discover_plugins", lambda: None)
+    monkeypatch.setattr(mcp_tool_mod, "discover_mcp_tools", lambda: None)
+    monkeypatch.setattr(config_mod, "load_config", lambda: {})
+    monkeypatch.setattr(
+        shell_hooks_mod,
+        "register_from_config",
+        lambda cfg, accept_hooks=False: None,
+    )
+    monkeypatch.setattr(gateway, "gateway_command", fake_gateway_command)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hermes",
+            "gateway",
+            "inject",
+            "--platform",
+            "slack",
+            "--chat-id",
+            "C123",
+            "--thread-id",
+            "171.1",
+            "--text",
+            "hello",
+        ],
+    )
+
+    main_mod.main()
+
+    args = captured["args"]
+    assert args.command == "gateway"
+    assert args.gateway_command == "inject"
+    assert args.platform == "slack"
+    assert args.chat_id == "C123"
+    assert args.thread_id == "171.1"
+    assert args.text == "hello"
+
+
 class TestSystemdLingerStatus:
     def test_reports_enabled(self, monkeypatch):
         monkeypatch.setattr(gateway, "is_linux", lambda: True)
