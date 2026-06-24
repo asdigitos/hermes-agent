@@ -2136,12 +2136,11 @@ class BasePlatformAdapter(ABC):
             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
             if path:
                 expanded = os.path.expanduser(path)
-                # Only treat MEDIA: tags as deliverable attachments when they
-                # point to a real file. This prevents explanatory text like
-                # `MEDIA:/absolute/path` in skills/docs from turning into bogus
-                # Slack uploads such as the root directory fallback `📎 File: /`.
-                if os.path.isfile(expanded):
-                    media.append((expanded, has_voice_tag))
+                # MEDIA: is an explicit delivery directive. Keep the path even
+                # when the file is not present at parse time so callers can
+                # strip the tag from user-visible text and surface a real send
+                # failure instead of leaking raw implementation syntax.
+                media.append((expanded, has_voice_tag))
 
         # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)
         if media:
