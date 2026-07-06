@@ -421,6 +421,14 @@ def test_thread_reply_with_active_session_processed():
     ) is True
 
 
+def test_strict_mention_ignores_thread_reply_with_active_session():
+    adapter = _make_adapter(require_mention=True, strict_mention=True)
+    assert _would_process(
+        adapter, text="followup",
+        thread_reply=True, active_session=True,
+    ) is False
+
+
 def test_thread_reply_without_active_session_ignored():
     adapter = _make_adapter(require_mention=True)
     assert _would_process(
