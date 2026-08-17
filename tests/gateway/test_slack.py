@@ -4625,6 +4625,34 @@ class TestNativeTaskCardProgress:
         assert adapter._native_task_card_streams == {}
 
     @pytest.mark.asyncio
+    async def test_native_chunk_update_does_not_mix_markdown_text(self, adapter):
+        client = adapter._app.client
+        client.api_call.side_effect = [
+            {"ts": "stream-1"},
+            {"ok": True},
+        ]
+
+        result = await adapter.send_native_task_card_progress(
+            "C1",
+            [{"id": "call-1", "title": "terminal", "status": "in_progress"}],
+            metadata={"thread_id": "thread-1"},
+            fallback_text="Hermes is working\n- terminal - running",
+        )
+
+        assert result.success is True
+        append_payload = client.api_call.await_args_list[1].kwargs["json"]
+        assert append_payload["chunks"] == [
+            {"type": "plan_update", "title": "Hermes is working"},
+            {
+                "type": "task_update",
+                "id": "call-1",
+                "title": "terminal",
+                "status": "in_progress",
+            },
+        ]
+        assert "markdown_text" not in append_payload
+
+    @pytest.mark.asyncio
     async def test_same_channel_thread_isolated_between_workspaces(self, adapter):
         clients = {"T1": AsyncMock(), "T2": AsyncMock()}
 
