@@ -32,27 +32,47 @@ If upstream later makes the patch unnecessary, mark it and remove the code in th
 - Notes: <optional links to commits / PRs / incidents>
 ```
 
-### Slack thinking-steps card + tool-call record
-- Status: active
-- Scope: `gateway/run.py` (`send_progress_messages` / `_drive_thinking_card` / `_slack_card_active`), `gateway/platforms/slack.py`, `gateway/stream_consumer.py`
-- Reason: our Slack UX collapses the per-tool wall of edited messages into one self-updating "thinking card" via `chat.startStream`/`appendStream`/`stopStream`, keeps a full tool-call record across paginated cards, and suppresses interim status/commentary so the card body stays clean until finalize. Upstream has no equivalent.
-- Upstream status: not proposed
-- Revalidation trigger: upstream adding native Slack streaming-card support, or any further upstream refactor of `send_progress_messages` / the progress queue.
-- Notes: downstream commits `e11d6e330` (#6), `1d2870945` (#12). During the 2026-06-24 sync these call sites were re-integrated on top of upstream's refactored progress loop (`progress_grouping`, `_roll_progress_overflow_if_needed`). NEEDS gateway smoke-test against a live Slack thread.
-
 ### Gateway runtime-provider routing + resolve logging
 - Status: active
-- Scope: `gateway/run.py` (`_resolve_runtime_provider_credentials`)
+- Scope: `gateway/run.py` (`_resolve_runtime_agent_kwargs`)
 - Reason: we honour `HERMES_INFERENCE_PROVIDER` by passing `requested=` into `resolve_runtime_provider()` and emit a `gateway runtime resolve start/result` log line for routing diagnostics. `resolve_runtime_provider` accepts `requested=` upstream, so this is additive.
 - Upstream status: not proposed (param is upstream-compatible; only the call-site arg + logging are ours)
 - Revalidation trigger: upstream changing `resolve_runtime_provider` provider-selection semantics.
-- Notes: downstream commit `5d230fcb8` (#11).
+- Notes: downstream commit `5d230fcb8` (#11), re-applied to the refactored gateway runtime in the `v2026.8.16` release sync.
+
+### Installed local skill inspect fallback
+- Status: active
+- Scope: `hermes_cli/skills_hub.py`
+- Reason: bare-name `hermes skills inspect <name>` should preview an already-installed local skill before consulting remote skill sources.
+- Upstream status: not proposed
+- Revalidation trigger: upstream adding an installed-local fallback to `do_inspect()` / `inspect_skill()`.
+- Notes: downstream commit `5d230fcb8` (#11); the fallback merged cleanly into `v2026.8.16`.
+
+### Mixed-version tool-registry generation compatibility
+- Status: active
+- Scope: `model_tools.py` (`_registry_generation` / tool-definition cache key)
+- Reason: a long-lived process may retain a pre-generation `ToolRegistry` object while newer source code is loaded; a guarded generation read avoids a startup/refresh crash without changing normal cache invalidation.
+- Upstream status: not proposed
+- Revalidation trigger: upstream adopting a migration-safe registry generation accessor or eliminating mixed-version reload paths.
+- Notes: downstream MCP hardening commits preceding #16; re-integrated with the release's scoped, locked tool-definition cache.
 
 ---
 
 ## Removed / upstreamed deltas
 
 Move entries here after they are no longer active.
+
+### Slack thinking-steps card + tool-call record — SUPERSEDED upstream (2026-08-17 sync)
+- Status: dropped
+- Scope: was `gateway/run.py`, `gateway/platforms/slack.py`, `gateway/stream_consumer.py`, and `tests/test_slack_thinking_card_overflow.py`
+- Reason it existed: collapse Slack tool progress into a self-updating `chat.startStream` task card with a complete tool-call record and final answer.
+- Resolution: upstream `v2026.8.16` moved Slack to `plugins/platforms/slack/adapter.py` and now ships native Slack task cards keyed by authoritative tool-call IDs, using `chat.startStream` / `appendStream` / `stopStream`. The downstream implementation targeted the deleted legacy adapter and old in-function progress runner, so it was removed in favor of the upstream implementation.
+
+### MCP add argparse destination compatibility — SUPERSEDED upstream (2026-08-17 sync)
+- Status: dropped
+- Scope: was `hermes_cli/mcp_config.py` and related parser tests
+- Reason it existed: avoid the nested MCP `--command` flag overwriting the top-level subcommand destination.
+- Resolution: upstream `v2026.8.16` uses the dedicated `mcp_command` destination. Transitional `mcp_stdio_command` / legacy-field compatibility was intentionally not carried forward.
 
 ### Slack send_message explicit target + thread routing — SUPERSEDED upstream (2026-06-24 sync)
 - Status: dropped
