@@ -6,9 +6,11 @@ loop-prevention policy. The ``cron.allow_agent_scheduling`` gate (config.yaml,
 default off) makes that denial opt-out-able:
 
   - gate off / absent: byte-exact current behavior — ``cronjob`` denied.
-  - gate on: ``cronjob`` dropped from the base denylist; ``messaging`` and
-    ``clarify`` (interactivity constraints) and ``memory`` (cron agents run
-    with skip_memory=True) are ALWAYS denied regardless of the gate.
+  - agent-scheduling gate on: ``cronjob`` dropped from the base denylist.
+  - agent-messaging gate on: ``messaging`` dropped from the base denylist so
+    autonomous jobs that explicitly need outbound business messages can send.
+  - ``clarify`` (requires a present user) and ``memory`` (cron agents run with
+    skip_memory=True) remain denied regardless of either gate.
   - user-level ``agent.disabled_toolsets`` still layers on top, so a user who
     denies ``cronjob`` globally keeps it denied even with the gate on
     (per-job enabled_toolsets can never widen past the config denylist).
@@ -19,10 +21,9 @@ import pytest
 from cron.scheduler import _resolve_cron_disabled_toolsets
 
 
-# The toolsets that must be denied in cron context no matter what the
-# agent-scheduling gate says: messaging/clarify are interactive-only,
-# memory is unbacked in cron runs (skip_memory=True).
-ALWAYS_DISABLED = ["messaging", "clarify", "memory"]
+# The toolsets that must be denied in cron context no matter what either gate
+# says: clarify requires a present user; memory is unbacked in cron runs.
+ALWAYS_DISABLED = ["clarify", "memory"]
 
 
 class TestGateOffDefault:
@@ -65,6 +66,26 @@ class TestGateOn:
         disabled = _resolve_cron_disabled_toolsets(cfg)
         for name in ALWAYS_DISABLED:
             assert name in disabled
+
+
+class TestAgentMessagingGate:
+    def test_messaging_is_denied_by_default(self):
+        assert "messaging" in _resolve_cron_disabled_toolsets({})
+
+    def test_explicit_gate_allows_messaging(self):
+        cfg = {"cron": {"allow_agent_messaging": True}}
+        disabled = _resolve_cron_disabled_toolsets(cfg)
+        assert "messaging" not in disabled
+        assert "cronjob" in disabled
+        for name in ALWAYS_DISABLED:
+            assert name in disabled
+
+    def test_user_denylist_wins_over_messaging_gate(self):
+        cfg = {
+            "cron": {"allow_agent_messaging": True},
+            "agent": {"disabled_toolsets": ["messaging"]},
+        }
+        assert "messaging" in _resolve_cron_disabled_toolsets(cfg)
 
     def test_user_denylist_wins_over_gate(self):
         # A user who denies cronjob in agent.disabled_toolsets keeps it
