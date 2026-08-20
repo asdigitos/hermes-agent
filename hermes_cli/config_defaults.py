@@ -2351,9 +2351,15 @@ DEFAULT_CONFIG = {
         # pattern). Off by default: the cronjob toolset is policy-denied in
         # cron context to prevent unattended scheduling loops. Jobs created
         # this way are user-owned in the same flat jobs table as every other
-        # job. Interactive toolsets (messaging/clarify) stay denied in cron
-        # context regardless of this setting.
+        # job. Interactive clarification stays denied in cron context
+        # regardless of this setting.
         "allow_agent_scheduling": False,
+        # Allow cron-spawned agents to use the messaging toolset for explicit
+        # outbound business messages in addition to normal cron delivery.
+        # Off by default because most jobs only need their final response
+        # delivered. Enable for autonomous workflows that must open or update
+        # a separate channel/thread while they run.
+        "allow_agent_messaging": False,
         # Pre-dispatch configuration validation (T1-26): before constructing
         # any agent machinery for a job, verify the provider API key resolves
         # (unless a fallback chain is configured), attached skills are ready

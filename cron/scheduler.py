@@ -315,8 +315,7 @@ class CronPromptInjectionBlocked(Exception):
 def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
     """Toolsets a cron-spawned agent must never receive.
 
-    Three toolsets are always disabled in cron context regardless of config:
-      - ``messaging`` — interactive, needs a live gateway session
+    Two toolsets are always disabled in cron context regardless of config:
       - ``clarify`` — interactive, blocks waiting for user input
       - ``memory`` — cron agents are constructed with ``skip_memory=True``, so
         exposing this tool only gives the model an unbacked tool that fails
@@ -327,16 +326,23 @@ def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
     manage the user's cron table. The gate only removes the built-in policy
     denial — it never overrides the user denylist below.
 
+    ``messaging`` is denied by default but may be enabled explicitly with
+    ``cron.allow_agent_messaging: true``. This supports autonomous jobs whose
+    business workflow requires outbound messages in addition to final-result
+    delivery, while preserving the safer default for ordinary cron jobs.
+
     User-level ``agent.disabled_toolsets`` from config.yaml is layered on top
     so per-job ``enabled_toolsets`` cannot bypass policy that applies to
     ordinary agent runs (#25752 — LLM-supplied enabled_toolsets was widening
     past config.yaml's denylist).
     """
     cron_cfg = (cfg or {}).get("cron") or {}
-    if cron_cfg.get("allow_agent_scheduling"):
-        disabled = ["messaging", "clarify", "memory"]
-    else:
-        disabled = ["cronjob", "messaging", "clarify", "memory"]
+    disabled = ["clarify", "memory"]
+    if not cron_cfg.get("allow_agent_scheduling"):
+        disabled.insert(0, "cronjob")
+    if not cron_cfg.get("allow_agent_messaging"):
+        insert_at = 1 if "cronjob" in disabled else 0
+        disabled.insert(insert_at, "messaging")
     agent_cfg = (cfg or {}).get("agent") or {}
     from agent.skill_utils import parse_config_string_list
 
