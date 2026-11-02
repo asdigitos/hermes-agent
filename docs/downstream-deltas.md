@@ -18,6 +18,17 @@ If upstream later makes the patch unnecessary, mark it and remove the code in th
 
 ---
 
+## Release revalidation: v0.22.5 (2026-11-02)
+
+- Target: official stable release `v0.22.5`, commit `bf0203a794a07aac3ff764972ab9087baa4e4f4e`; not upstream/main or a canary.
+- Provider override/logging: retained at `_resolve_runtime_agent_kwargs`, forwarding `HERMES_INFERENCE_PROVIDER` through upstream's shared `resolve_runtime_with_fallback(requested=...)`. Adopted upstream capability/request-override propagation and fallback notices instead of retaining the obsolete downstream resolver loop.
+- Installed-local skill preview: retained in upstream's refactored `do_inspect()` and `inspect_skill()` paths. Regression coverage exercises real installed-skill discovery with a temporary Hermes home and rejects remote-source access.
+- Registry generation compatibility: retained as an inline guarded read in upstream's `_tool_defs_cache_key`; upstream cache structure, scope and invalidation remain intact. A cache-miss/cache-hit regression covers a registry without `_generation`.
+- Adopted upstream deletion of `tests/gateway/test_max_tokens_propagation.py`: legacy gateway max-token kwargs were removed upstream. Ported its downstream provider-override regression to `tests/gateway/test_downstream_provider_override.py`; did not restore obsolete token plumbing.
+- Kept the four downstream operator documents under `docs/` (including this ledger), rejecting Git's directory-rename heuristic into the upstream documentation site. Existing operator links and rollback scripts remain unchanged.
+- Validation is targeted, not a full-release certification. The operator maintenance scripts remain retained but were not executed against the live installation.
+- Local installation adoption and gateway restart require Victor's explicit confirmation; neither is part of this release-sync PR.
+
 ## Active downstream deltas
 
 ### Template
@@ -35,7 +46,7 @@ If upstream later makes the patch unnecessary, mark it and remove the code in th
 ### Gateway runtime-provider routing + resolve logging
 - Status: active
 - Scope: `gateway/run.py` (`_resolve_runtime_agent_kwargs`)
-- Reason: we honour `HERMES_INFERENCE_PROVIDER` by passing `requested=` into `resolve_runtime_provider()` and emit a `gateway runtime resolve start/result` log line for routing diagnostics. `resolve_runtime_provider` accepts `requested=` upstream, so this is additive.
+- Reason: we honour `HERMES_INFERENCE_PROVIDER` by passing `requested=` into upstream's shared `resolve_runtime_with_fallback()` and emit `gateway runtime resolve start/result` log lines for routing diagnostics. The shared fallback resolver accepts `requested=`, so this remains additive.
 - Upstream status: not proposed (param is upstream-compatible; only the call-site arg + logging are ours)
 - Revalidation trigger: upstream changing `resolve_runtime_provider` provider-selection semantics.
 - Notes: downstream commit `5d230fcb8` (#11), re-applied to the refactored gateway runtime in the `v2026.8.16` release sync.
@@ -50,7 +61,7 @@ If upstream later makes the patch unnecessary, mark it and remove the code in th
 
 ### Mixed-version tool-registry generation compatibility
 - Status: active
-- Scope: `model_tools.py` (`_registry_generation` / tool-definition cache key)
+- Scope: `model_tools.py` (`_tool_defs_cache_key` / tool-definition cache key)
 - Reason: a long-lived process may retain a pre-generation `ToolRegistry` object while newer source code is loaded; a guarded generation read avoids a startup/refresh crash without changing normal cache invalidation.
 - Upstream status: not proposed
 - Revalidation trigger: upstream adopting a migration-safe registry generation accessor or eliminating mixed-version reload paths.
